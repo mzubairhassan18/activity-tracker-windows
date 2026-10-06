@@ -1,0 +1,10 @@
+[package]
+name = "tracker-dashboard"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow"] }
+tracker-core = { version = "0.1.0", path = "../tracker-core" }
