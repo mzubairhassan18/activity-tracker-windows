@@ -3,7 +3,8 @@
 mod report_text;
 mod tray;
 
-use std::path::Path;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -163,7 +164,7 @@ fn cmd_watch(interval: f32, idle_after: f32, no_urls: bool, no_tray: bool, hidde
         let result = sampler.run();
         done_t.store(true, Ordering::Relaxed);
         if let Err(e) = result {
-            eprintln!("sampler stopped: {e:#}");
+            log_line(&format!("sampler stopped: {e:#}"));
         }
     });
 
@@ -393,6 +394,35 @@ fn cmd_status() -> Result<()> {
         report_text::fmt_dur(today.idle_secs)
     );
     Ok(())
+}
+
+// ---------------------------------------------------------- diagnostics ---
+
+/// Where the tracker keeps its data; reused for the log file next to it.
+fn data_dir() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("activity-tracker")
+}
+
+/// Append a line to `%LOCALAPPDATA%\activity-tracker\tracker.log`.
+///
+/// With `--hidden` the console window is gone, so anything printed to stderr is
+/// invisible: a tray action that fails would otherwise do nothing at all.
+pub(crate) fn log_line(msg: &str) {
+    let dir = data_dir();
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("tracker.log"))
+    {
+        let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
+        let _ = writeln!(f, "[{ts}] {msg}");
+    }
 }
 
 // ------------------------------------------------------------ dashboard ----

@@ -1,7 +1,7 @@
 //! Thin Win32 helpers: foreground window, process name, idle time.
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
-use windows::Win32::System::Console::GetConsoleWindow;
+use windows::Win32::System::Console::{FreeConsole, GetConsoleWindow};
 use windows::Win32::System::SystemInformation::GetTickCount;
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -99,12 +99,24 @@ pub fn exe_name_of(pid: u32) -> Option<String> {
     }
 }
 
-/// Hide the console window of the current process (used with `watch --hidden`).
+/// Detach the current process from its console (used with `watch --hidden`).
+///
+/// `ShowWindow` is not enough. A classic console window allocated for us at
+/// logon can be hidden, but a pseudo console (Windows Terminal, VS Code, any
+/// ConPTY host) cannot: `ShowWindow` reports success and leaves the terminal
+/// window open, so the tracker stays welded to it and closing that terminal
+/// kills tracking too. Detaching unconditionally handles both cases — the
+/// console window goes away, or the terminal simply closes, and the tracker
+/// keeps running independently either way.
+///
+/// Note: after detaching, `Ctrl+C` no longer reaches the process; use
+/// `tracker stop` (which signals through the database) instead.
 pub fn hide_console_window() {
     unsafe {
         let hwnd = GetConsoleWindow();
         if !hwnd.is_invalid() {
             let _ = ShowWindow(hwnd, SW_HIDE);
         }
+        let _ = FreeConsole();
     }
 }

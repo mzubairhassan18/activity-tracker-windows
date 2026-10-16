@@ -1,5 +1,9 @@
 //! Graphical weekly dashboard for the activity tracker.
 
+// Without this the binary is a console-subsystem app, so every launch from the
+// tray also flashes an empty console window behind the dashboard.
+#![windows_subsystem = "windows"]
+
 use std::time::{Duration, Instant};
 
 use chrono::{Datelike, Duration as ChronoDuration, Local, NaiveDate, NaiveTime};

@@ -4,6 +4,14 @@
 //!   * Open dashboard – launches the dashboard window
 //!   * Pause tracking  – toggles sampling (persisted to the database)
 //!   * Exit tracker    – flushes and quits
+//!
+//! IMPORTANT: both muda and tray-icon route an event to `set_event_handler`
+//! *instead of* the `receiver()` channel — see `MenuEvent::send` and
+//! `TrayIconEvent::send`. Installing a handler therefore *disables* the
+//! channel, so `MenuEvent::receiver().try_recv()` can never yield anything.
+//! Events must be forwarded through the proxy as the event payload and handled
+//! on the loop thread, where the non-`Send` menu items are still reachable.
+//! See https://github.com/tauri-apps/tray-icon/issues/209.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -16,10 +24,16 @@ use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuIt
 use tray_icon::{Icon, TrayIconBuilder, TrayIconEvent};
 
 use crate::launch_dashboard;
+use crate::log_line;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum UserEvent {
-    Wake,
+    /// A menu item was activated.
+    Menu(MenuEvent),
+    /// A tray icon click (left / right / double-click).
+    Tray(TrayIconEvent),
+    /// The sampler thread exited on its own: shut the tray down as well.
+    SamplerDone,
 }
 
 pub struct TrayOptions {
@@ -33,17 +47,23 @@ pub struct TrayOptions {
 }
 
 pub fn run(opts: TrayOptions) -> Result<()> {
-    let paused = opts.paused.clone();
+    let opts = Arc::new(opts);
 
     let menu = Menu::new();
     let open_item = MenuItem::new("Open dashboard", true, None);
     let pause_item =
-        CheckMenuItem::new("Pause tracking", true, paused.load(Ordering::Relaxed), None);
+        CheckMenuItem::new("Pause tracking", true, opts.paused.load(Ordering::Relaxed), None);
     let exit_item = MenuItem::new("Exit tracker", true, None);
     menu.append(&open_item)?;
     menu.append(&pause_item)?;
     menu.append(&PredefinedMenuItem::separator())?;
     menu.append(&exit_item)?;
+
+    // Owned copies of the ids: the menu items are `Rc`-based and cannot cross
+    // into the `Send` handler closures, but their ids are plain strings.
+    let open_id = open_item.id().0.clone();
+    let pause_id = pause_item.id().0.clone();
+    let exit_id = exit_item.id().0.clone();
 
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
@@ -55,22 +75,23 @@ pub fn run(opts: TrayOptions) -> Result<()> {
         let done_flag = opts.sampler_done.clone();
         std::thread::spawn(move || loop {
             if done_flag.load(Ordering::Relaxed) {
-                let _ = watchdog_proxy.send_event(UserEvent::Wake);
+                let _ = watchdog_proxy.send_event(UserEvent::SamplerDone);
                 break;
             }
             std::thread::sleep(Duration::from_millis(400));
         });
     }
 
-    // Menu clicks and tray events arrive on the message-pump thread; wake the
-    // event loop so the main closure can process them.
-    let proxy_for_menu = proxy.clone();
-    MenuEvent::set_event_handler(Some(move |_event| {
-        let _ = proxy_for_menu.send_event(UserEvent::Wake);
-    }));
-    TrayIconEvent::set_event_handler(Some(move |_event| {
-        let _ = proxy.send_event(UserEvent::Wake);
-    }));
+    // Forward the events themselves so the loop is woken *and* has the payload.
+    {
+        let menu_proxy = proxy.clone();
+        MenuEvent::set_event_handler(Some(move |event| {
+            let _ = menu_proxy.send_event(UserEvent::Menu(event));
+        }));
+        TrayIconEvent::set_event_handler(Some(move |event| {
+            let _ = proxy.send_event(UserEvent::Tray(event));
+        }));
+    }
 
     let tray = TrayIconBuilder::new()
         .with_tooltip("Activity Tracker — click for menu")
@@ -78,42 +99,36 @@ pub fn run(opts: TrayOptions) -> Result<()> {
         .with_icon(make_icon())
         .build()?;
 
-    let opts = Arc::new(opts);
-    let opts_exit = opts.clone();
-    let pause_item_exit = pause_item.clone();
-
     event_loop.run(move |event, _window_target, control_flow| {
         *control_flow = ControlFlow::Wait;
 
         match event {
-            Event::UserEvent(UserEvent::Wake) => {
-                // Sampler exited by itself (stop command / error): shut the
-                // tray down as well (nothing left to flush).
-                if opts.sampler_done.load(Ordering::Relaxed) {
-                    *control_flow = ControlFlow::Exit;
-                    return;
+            Event::UserEvent(UserEvent::Menu(menu_event)) => {
+                let id = &menu_event.id().0;
+                if *id == open_id {
+                    if let Err(e) = launch_dashboard() {
+                        // stderr is invisible under `--hidden`, so log to disk.
+                        log_line(&format!("open dashboard failed: {e:#}"));
+                    }
+                } else if *id == pause_id {
+                    let new_state = !opts.paused.load(Ordering::Relaxed);
+                    opts.paused.store(new_state, Ordering::Relaxed);
+                    pause_item.set_checked(new_state);
+                    (opts.on_pause_change)(new_state);
+                } else if *id == exit_id {
+                    shutdown(&opts, control_flow);
                 }
-                while let Ok(menu_event) = MenuEvent::receiver().try_recv() {
-                    if menu_event.id() == open_item.id() {
-                        if let Err(e) = launch_dashboard() {
-                            eprintln!("failed to open dashboard: {e:?}");
-                        }
-                    } else if menu_event.id() == pause_item.id() {
-                        let new_state = !opts.paused.load(Ordering::Relaxed);
-                        opts.paused.store(new_state, Ordering::Relaxed);
-                        pause_item_exit.set_checked(new_state);
-                        (opts.on_pause_change)(new_state);
-                    } else if menu_event.id() == exit_item.id() {
-                        shutdown(&opts_exit, control_flow);
+            }
+            Event::UserEvent(UserEvent::Tray(tray_event)) => {
+                if let TrayIconEvent::DoubleClick { .. } = tray_event {
+                    if let Err(e) = launch_dashboard() {
+                        log_line(&format!("open dashboard failed: {e:#}"));
                     }
                 }
-                while let Ok(event) = TrayIconEvent::receiver().try_recv() {
-                    if let TrayIconEvent::DoubleClick { .. } = event {
-                        if let Err(e) = launch_dashboard() {
-                            eprintln!("failed to open dashboard: {e:?}");
-                        }
-                    }
-                }
+            }
+            Event::UserEvent(UserEvent::SamplerDone) => {
+                // Nothing left to flush.
+                *control_flow = ControlFlow::Exit;
             }
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
