@@ -65,7 +65,7 @@ Binaries land in `target\debug\` (or `target\release\` after
 .\target\debug\tracker.exe export --from 2026-10-01 --to 2026-10-06 --format csv --out week.csv
 .\target\debug\tracker.exe export --format json --out data.json
 
-# Start at login / stop / check  (runs `watch --hidden` — no console window)
+# Start at login / stop / check  (runs `watch --hidden` — detached from the console)
 .\target\debug\tracker.exe autostart on
 .\target\debug\tracker.exe autostart off
 .\target\debug\tracker.exe autostart status
@@ -77,7 +77,7 @@ A literal Windows service cannot be used for this: services run in
 "session 0", which is isolated from your interactive desktop — they cannot
 see which window is in the foreground. The tracker therefore starts at
 **logon** (same as Task Scheduler "At log on" / the Run registry key) inside
-your session, with the console hidden (`--hidden`) and a tray icon for
+your session, detached from the console (`--hidden`) and a tray icon for
 control. Combine with `autostart on` + `pause`/`resume`/`stop` for
 service-like operation.
 
@@ -89,11 +89,13 @@ service-like operation.
 | `--idle-after <mins>` | Minutes without input before counting as idle (default `3.0`) |
 | `--no-urls` | Don't read browser URLs (titles only) — maximum privacy |
 | `--no-tray` | No tray icon (headless) |
-| `--hidden` | Hide the console window (used by autostart) |
+| `--hidden` | Detach from the console (used by autostart) — no console window, but `Ctrl+C` won't reach it, so use `tracker stop` |
 
 ## Data
 
 - Database: `%LOCALAPPDATA%\activity-tracker\tracker.db` (SQLite, WAL mode)
+- Log: `%LOCALAPPDATA%\activity-tracker\tracker.log` — errors that would
+  otherwise go to stderr, which is unreachable under `--hidden`.
 - One row per *segment*: a period where the same window was in the foreground
   with the same active/idle state (`start`, `end`, `app`, `title`, `url`,
   `category`, `state`).
